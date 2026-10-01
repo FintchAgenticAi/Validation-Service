@@ -153,7 +153,7 @@ Use `check_ids` with either active rule codes or numeric rule IDs returned by th
             }
         }
     ],
-    "check_ids": ["VR_001_NULL_CHECK", "VR_002_MAX_LENGTH_CHECK"]
+    "check_ids": ["VR_001", "VR_002"]
 }
 ```
 
