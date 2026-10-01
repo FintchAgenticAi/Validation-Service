@@ -128,6 +128,86 @@ def load_active_rule_pipeline() -> List[Dict[str, Any]]:
             connection.close()
 
 
+def list_active_rules() -> List[Dict[str, Any]]:
+    query = """
+        SELECT r.rule_id, r.rule_code, r.rule_name, r.description,
+               r.severity_level, c.category_name
+        FROM validation_rules AS r
+        LEFT JOIN validation_categories AS c ON c.category_id = r.category_id
+        WHERE r.status = 'active'
+        ORDER BY r.rule_id
+    """
+
+    connection = None
+    cursor = None
+    try:
+        connection = get_connection()
+        cursor = connection.cursor(dictionary=True)
+        cursor.execute(query)
+        return cursor.fetchall()
+    finally:
+        if cursor is not None:
+            cursor.close()
+        if connection is not None and connection.is_connected():
+            connection.close()
+
+
+def get_active_rule(rule_id: str) -> Dict[str, Any] | None:
+    query = """
+        SELECT r.rule_id, r.rule_code, r.rule_name, r.description,
+               r.severity_level, c.category_name
+        FROM validation_rules AS r
+        LEFT JOIN validation_categories AS c ON c.category_id = r.category_id
+        WHERE r.status = 'active'
+          AND (r.rule_code = %s OR CAST(r.rule_id AS CHAR) = %s)
+        LIMIT 1
+    """
+
+    connection = None
+    cursor = None
+    try:
+        connection = get_connection()
+        cursor = connection.cursor(dictionary=True)
+        cursor.execute(query, (rule_id, rule_id))
+        return cursor.fetchone()
+    finally:
+        if cursor is not None:
+            cursor.close()
+        if connection is not None and connection.is_connected():
+            connection.close()
+
+
+def list_validation_logs(limit: int, offset: int) -> List[Dict[str, Any]]:
+    query = """
+        SELECT l.log_id AS id,
+               l.request_id AS record_id,
+               r.rule_code AS rule_id,
+               CASE WHEN l.failed_record_count = 0 THEN TRUE ELSE FALSE END AS passed,
+               CASE
+                   WHEN l.failed_record_count = 0 THEN NULL
+                   ELSE CONCAT('Validation failed for ', l.failed_record_count, ' record(s)')
+               END AS message,
+               l.ended_at AS created_at
+        FROM validation_logic_logs AS l
+        JOIN validation_rules AS r ON r.rule_id = l.rule_id
+        ORDER BY l.ended_at DESC, l.log_id DESC
+        LIMIT %s OFFSET %s
+    """
+
+    connection = None
+    cursor = None
+    try:
+        connection = get_connection()
+        cursor = connection.cursor(dictionary=True)
+        cursor.execute(query, (limit, offset))
+        return cursor.fetchall()
+    finally:
+        if cursor is not None:
+            cursor.close()
+        if connection is not None and connection.is_connected():
+            connection.close()
+
+
 def find_active_rule_metadata(rule_code: str, method_path: str) -> Dict[str, int]:
     query = """
         SELECT r.rule_id, m.method_id, v.version_id

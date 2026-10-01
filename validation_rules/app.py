@@ -5,12 +5,15 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
 from validation_rules.database import (
     check_connection,
+    get_active_rule,
     find_active_rule_metadata,
+    list_active_rules,
+    list_validation_logs,
     load_active_rule_pipeline,
     write_validation_log,
 )
@@ -154,9 +157,67 @@ class ValidationResponse(BaseModel):
     execution_metrics: List[Dict[str, Any]]
 
 
+class BatchRecord(BaseModel):
+    record_id: str
+    data: Dict[str, Any]
+
+
+class BatchValidationRequest(BaseModel):
+    records: List[BatchRecord]
+    check_ids: List[str]
+
+
+class BatchValidationError(BaseModel):
+    rule_id: str
+    message: str
+
+
+class BatchValidationResult(BaseModel):
+    record_id: str
+    passed: bool
+    errors: List[BatchValidationError]
+
+
+class BatchValidationResponse(BaseModel):
+    results: List[BatchValidationResult]
+
+
 # =============================================================================
 # ENDPOINTS
 # =============================================================================
+
+
+@app.get("/api/v1/validation/rules", tags=["Validation Rules"])
+def get_rules():
+    """Returns all active validation rules."""
+    try:
+        rules = list_active_rules()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Unable to load validation rules: {exc}")
+    return [
+        {
+            "rule_id": rule["rule_code"],
+            "name": rule["rule_name"],
+            "description": rule["description"],
+        }
+        for rule in rules
+    ]
+
+
+@app.get("/api/v1/validation/rules/{rule_id}", tags=["Validation Rules"])
+def get_rule(rule_id: str):
+    """Returns one active validation rule by numeric ID or rule code."""
+    try:
+        rule = get_active_rule(rule_id)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Unable to load validation rule: {exc}")
+    if rule is None:
+        raise HTTPException(status_code=404, detail=f"Validation rule '{rule_id}' was not found")
+    return {
+        "rule_id": rule["rule_code"],
+        "name": rule["rule_name"],
+        "description": rule["description"],
+    }
 
 
 @app.get("/health", tags=["System Health"])
@@ -169,6 +230,73 @@ def health_check():
         "zone": "Silver",
         "database": database_status,
     }
+
+
+@app.post(
+    "/api/v1/validation/batch",
+    response_model=BatchValidationResponse,
+    status_code=status.HTTP_200_OK,
+    tags=["Validation Execution Engine"],
+)
+def execute_batch_validation(payload: BatchValidationRequest):
+    """Validates each record against the selected active rules."""
+    if not payload.records:
+        raise HTTPException(status_code=400, detail="Payload contains no data records.")
+    if not payload.check_ids:
+        raise HTTPException(status_code=400, detail="check_ids must contain at least one rule.")
+
+    try:
+        active_pipeline = load_active_rule_pipeline()
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Unable to load rules from MySQL: {exc}")
+
+    requested_ids = set(payload.check_ids)
+    selected_pipeline = [
+        rule for rule in active_pipeline
+        if rule["rule_code"] in requested_ids or str(rule["rule_id"]) in requested_ids
+    ]
+    if len(selected_pipeline) != len(requested_ids):
+        available_ids = {rule["rule_code"] for rule in active_pipeline}
+        available_ids.update(str(rule["rule_id"]) for rule in active_pipeline)
+        unknown_ids = sorted(requested_ids - available_ids)
+        raise HTTPException(status_code=404, detail=f"Unknown validation rule(s): {unknown_ids}")
+
+    results = []
+    for record in payload.records:
+        validation = execute_validation_pipeline(
+            ValidationRequest(
+                request_id=record.record_id,
+                records=[record.data],
+                rule_pipeline=[RuleConfiguration(**rule) for rule in selected_pipeline],
+            )
+        )
+        errors = [
+            BatchValidationError(
+                rule_id=item.get("failed_rule_code", "unknown"),
+                message=f"Validation failed for rule {item.get('failed_rule_code', 'unknown')}",
+            )
+            for item in validation.quarantined_records
+        ]
+        results.append(
+            BatchValidationResult(
+                record_id=record.record_id,
+                passed=not errors,
+                errors=errors,
+            )
+        )
+    return BatchValidationResponse(results=results)
+
+
+@app.get("/api/v1/validation/logs", tags=["Validation Logs"])
+def get_logs(
+    limit: int = Query(default=50, gt=0),
+    offset: int = Query(default=0, ge=0),
+):
+    """Returns recent validation execution logs."""
+    try:
+        return list_validation_logs(limit=limit, offset=offset)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Unable to load validation logs: {exc}")
 
 
 @app.post(
